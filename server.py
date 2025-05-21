@@ -3,6 +3,7 @@ import time
 import asyncio
 from typing import Annotated
 from typing_extensions import TypedDict
+from operator import add
 
 from dotenv import load_dotenv
 
@@ -11,7 +12,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler,\
                          ContextTypes, filters, MessageHandler
 
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_core.tools import tool
 from langgraph.prebuilt import tools_condition, ToolNode
 
@@ -60,7 +61,17 @@ class GraphState(TypedDict):
     messages: Annotated[list, add_messages]
 
 def chatbot(state: GraphState):
-    return {'messages': llm.invoke(state['messages'])}  
+    x = llm.invoke(state['messages'])
+    if x.response_metadata['token_usage']['total_tokens'] >= int(os.environ['TOKEN_LIMIT']):
+        reduced_text = llm.invoke([
+            SystemMessage('Your task is to summarize the following conversation between a useful AI agent and a user in the sortest possible amount of tokens.'),
+            *state['messages'][1:],
+            AIMessage(x.content)
+        ])  
+
+        state['messages'] = [SystemMessage(system_prompt + '\nYou have been chating with the user for a while. Here is a quick summary of the chat separated with three backtichs(`): ```{reduced_text.content}```'),]
+
+    return {'messages': x}  
 
 graph_builder = StateGraph(GraphState)
 tool_node = ToolNode(tools=[transfer_money])
@@ -99,8 +110,12 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     messages.append(HumanMessage(update.message.text))
     result = graph.invoke({'messages': messages}, config=config)
-
-    await update.message.reply_text(result['messages'][-1].content)
+    text = result['messages'][-1].content
+    if len(text) > 4096:
+        for x in range(0, len(text), 4000):  
+            await update.message.reply_text(text[x:x+4000])
+    else:
+        await update.message.reply_text(text)
 
 async def other_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('You are not allowed to send this type of message to the bot.')
@@ -109,6 +124,7 @@ async def other_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def reser_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if db.get(update.effective_chat.id) is not None:
         db.put(update.effective_chat.id, None)
+        await update.message.reply_text('Done.')
 
 if __name__ == '__main__':
     app.add_handler(CommandHandler('start', start_command))
